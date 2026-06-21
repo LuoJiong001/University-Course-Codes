@@ -1,0 +1,206 @@
+import os
+import re
+import jieba
+import numpy as np
+import pandas as pd
+import imageio
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+from wordcloud import WordCloud
+from sklearn.naive_bayes import MultinomialNB
+from sklearn.model_selection import train_test_split
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.metrics import confusion_matrix, classification_report
+
+# ====================== 核心配置 ======================
+# 根目录
+ROOT_DIR = '/Users/lohas/PycharmProjects/垃圾信息分类/'
+DATA_PATH = os.path.join(ROOT_DIR, 'message800.csv')
+DICT_PATH = os.path.join(ROOT_DIR, 'newdic1.txt')
+STOPWORD_PATH = os.path.join(ROOT_DIR, 'stopword.txt')
+BACK_PIC_PATH = os.path.join(ROOT_DIR, 'background.jpg')
+SAVE_DIR = os.path.join(ROOT_DIR, 'tmp')
+
+# 自动检测Mac可用中文字体（优先选.ttf格式）
+def get_mac_chinese_font():
+    font_list = fm.findSystemFonts(fontpaths=None, fontext='ttf') + fm.findSystemFonts(fontpaths=None, fontext='ttc')
+    # 优先顺序：黑体 > 苹方 > Arial Unicode
+    for font in font_list:
+        if 'SimHei.ttf' in font:
+            return font
+        elif 'Heiti.ttc' in font:
+            return font
+        elif 'PingFang.ttc' in font:
+            return font
+        elif 'Arial Unicode MS.ttf' in font:
+            return font
+    return None
+
+# Mac中文显示配置
+plt.rcParams['font.sans-serif'] = ['PingFang SC', 'Heiti SC', 'Arial Unicode MS']
+plt.rcParams['axes.unicode_minus'] = False
+MAC_FONT_PATH = get_mac_chinese_font()
+if not MAC_FONT_PATH:
+    print("警告：未找到系统中文字体，词云可能无中文")
+
+# ====================== 1. 数据读取与预处理 ======================
+data = pd.read_csv(
+    DATA_PATH,
+    encoding='utf-8',
+    index_col=0,
+    header=None,
+    names=['类别', '短信']
+)
+print("=== 数据类别分布 ===")
+print(data['类别'].value_counts())
+
+data['短信'] = data['短信'].fillna('').astype(str)
+print(f"\n缺失值数量：{data['短信'].isnull().sum()}")
+
+data = data.drop_duplicates(subset=['短信'], keep='first')
+data_dup = data['短信']
+print(f"去重后数据量：{len(data_dup)}")
+
+# 脱敏
+l1 = data_dup.apply(len).sum()
+data_qumin = data_dup.apply(lambda x: re.sub(r'[xX]', '', x))
+l2 = data_qumin.apply(len).sum()
+print(f"脱敏后减少字符数：{l1 - l2}")
+
+# ====================== 2. 分词与去停用词 ======================
+if os.path.exists(DICT_PATH):
+    jieba.load_userdict(DICT_PATH)
+    print(f"成功加载自定义词典：{DICT_PATH}")
+else:
+    print(f"自定义词典不存在：{DICT_PATH}")
+
+data_cut = data_qumin.apply(lambda x: list(jieba.cut(x.strip())) if x.strip() else [])
+
+# 加载停用词
+try:
+    stopword = pd.read_csv(
+        STOPWORD_PATH,
+        sep='ooo',
+        encoding='gbk',
+        header=None,
+        engine='python'
+    )[0].tolist()
+except UnicodeDecodeError:
+    stopword = pd.read_csv(
+        STOPWORD_PATH,
+        sep='ooo',
+        encoding='utf-8',
+        header=None,
+        engine='python'
+    )[0].tolist()
+stopword = [' ', '\n', '\t', '\r', '', '　', '\u3000'] + stopword
+
+# 去停用词
+l3 = data_cut.apply(len).sum()
+data_qustop = data_cut.apply(lambda x: [word for word in x if word not in stopword and word.strip()])
+l4 = data_qustop.apply(len).sum()
+print(f"去停用词后减少字符数：{l3 - l4}")
+
+data_qustop = data_qustop[data_qustop.apply(len) > 0]
+data = data.loc[data_qustop.index]
+lab1 = data['类别']
+print(f"有效数据量：{len(data_qustop)}")
+
+# ====================== 3. 词频统计 ======================
+def cipin(data_series, num=10):
+    text_all = ' '.join(data_series.apply(lambda x: ' '.join(x)))
+    word_count = pd.Series(text_all.split()).value_counts()
+    return word_count[word_count > num]
+
+data_gar = data_qustop[lab1 == 1]
+data_nor = data_qustop[lab1 == 0]
+data_gar1 = cipin(data_gar, num=5)
+data_nor1 = cipin(data_nor, num=5)
+print(f"\n垃圾短信高频词数量：{len(data_gar1)}")
+print(f"非垃圾短信高频词数量：{len(data_nor1)}")
+
+# ====================== 4. 词云可视化（修复字体） ======================
+# 加载背景图
+try:
+    back_pic = imageio.imread(BACK_PIC_PATH) if os.path.exists(BACK_PIC_PATH) else None
+except Exception as e:
+    print(f"加载背景图片失败：{e}，使用默认矩形词云")
+    back_pic = None
+
+# 初始化词云（容错处理）
+try:
+    wc = WordCloud(
+        font_path=MAC_FONT_PATH,
+        background_color='white',
+        max_words=2000,
+        mask=back_pic,
+        max_font_size=200,
+        random_state=1234,
+        width=1000,
+        height=600,
+        collocations=False,
+        font_step=1
+    )
+except Exception as e:
+    print(f"字体加载失败：{e}，使用系统默认字体")
+    wc = WordCloud(
+        background_color='white',
+        max_words=2000,
+        mask=back_pic,
+        max_font_size=200,
+        random_state=1234,
+        width=1000,
+        height=600,
+        collocations=False,
+        font_step=1
+    )
+
+# 创建保存目录
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+# 垃圾短信词云
+print("\n生成垃圾短信词云...")
+gar_wordcloud = wc.fit_words(data_gar1)
+plt.figure(figsize=(16, 8), dpi=100)
+plt.imshow(gar_wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title('垃圾短信词云', fontsize=20, pad=20)
+gar_cloud_path = os.path.join(SAVE_DIR, 'spam.jpg')
+plt.savefig(gar_cloud_path, dpi=300, bbox_inches='tight', facecolor='white')
+plt.show()
+print(f"垃圾短信词云已保存至：{gar_cloud_path}")
+
+# 非垃圾短信词云
+print("\n生成非垃圾短信词云...")
+nor_wordcloud = wc.fit_words(data_nor1)
+plt.figure(figsize=(16, 8), dpi=100)
+plt.imshow(nor_wordcloud, interpolation='bilinear')
+plt.axis('off')
+plt.title('非垃圾短信词云', fontsize=20, pad=20)
+nor_cloud_path = os.path.join(SAVE_DIR, 'non-spam.jpg')
+plt.savefig(nor_cloud_path, dpi=300, bbox_inches='tight', facecolor='white')
+plt.show()
+print(f"非垃圾短信词云已保存至：{nor_cloud_path}")
+
+# ====================== 5. 朴素贝叶斯分类 ======================
+print("\n=== 开始训练朴素贝叶斯分类模型 ===")
+data_text = data_qustop.apply(lambda x: ' '.join(x))
+X = data_text.values
+y = lab1.values
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+vectorizer = CountVectorizer(max_features=5000, max_df=0.95, min_df=2)
+X_train_vec = vectorizer.fit_transform(X_train)
+X_test_vec = vectorizer.transform(X_test)
+
+model = MultinomialNB(alpha=0.5)
+model.fit(X_train_vec, y_train)
+
+y_pred = model.predict(X_test_vec)
+print("\n混淆矩阵：")
+print(confusion_matrix(y_test, y_pred))
+print("\n分类报告：")
+print(classification_report(y_test, y_pred, target_names=['非垃圾短信', '垃圾短信']))
